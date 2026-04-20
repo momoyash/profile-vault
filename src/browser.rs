@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Result, VaultError};
 
@@ -42,7 +42,9 @@ impl Browser {
         let path = match self {
             Browser::Chrome => PathBuf::from(&local_app_data).join("Google/Chrome/User Data"),
             Browser::Edge => PathBuf::from(&local_app_data).join("Microsoft/Edge/User Data"),
-            Browser::Brave => PathBuf::from(&local_app_data).join("BraveSoftware/Brave-Browser/User Data"),
+            Browser::Brave => {
+                PathBuf::from(&local_app_data).join("BraveSoftware/Brave-Browser/User Data")
+            }
             Browser::Chromium => PathBuf::from(&local_app_data).join("Chromium/User Data"),
             Browser::Firefox => PathBuf::from(&app_data).join("Mozilla/Firefox/Profiles"),
         };
@@ -61,7 +63,10 @@ impl Browser {
     }
 
     pub fn is_chromium_based(&self) -> bool {
-        matches!(self, Browser::Chrome | Browser::Edge | Browser::Brave | Browser::Chromium)
+        matches!(
+            self,
+            Browser::Chrome | Browser::Edge | Browser::Brave | Browser::Chromium
+        )
     }
 
     pub fn list_profiles(&self) -> Result<Vec<ProfileInfo>> {
@@ -108,7 +113,7 @@ impl Browser {
         Ok(profiles)
     }
 
-    fn get_chromium_profile_name(&self, profile_path: &PathBuf) -> Result<String> {
+    fn get_chromium_profile_name(&self, profile_path: &Path) -> Result<String> {
         let prefs_path = profile_path.join("Preferences");
         if prefs_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&prefs_path) {
@@ -119,7 +124,8 @@ impl Browser {
                 }
             }
         }
-        Ok(profile_path.file_name()
+        Ok(profile_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string()))
     }
@@ -144,7 +150,13 @@ impl ProfileInfo {
 }
 
 pub fn detect_browsers() -> Vec<Browser> {
-    let all = [Browser::Chrome, Browser::Edge, Browser::Firefox, Browser::Brave, Browser::Chromium];
+    let all = [
+        Browser::Chrome,
+        Browser::Edge,
+        Browser::Firefox,
+        Browser::Brave,
+        Browser::Chromium,
+    ];
     all.into_iter()
         .filter(|b| b.profiles_dir().map(|p| p.exists()).unwrap_or(false))
         .collect()

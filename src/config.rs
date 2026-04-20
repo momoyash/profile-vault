@@ -26,8 +26,7 @@ impl Config {
         let path = Self::config_path()?;
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&content)
-                .map_err(|e| VaultError::Config(e.to_string()))
+            serde_json::from_str(&content).map_err(|e| VaultError::Config(e.to_string()))
         } else {
             Ok(Self::default())
         }
@@ -38,15 +37,17 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| VaultError::Config(e.to_string()))?;
+        let content =
+            serde_json::to_string_pretty(self).map_err(|e| VaultError::Config(e.to_string()))?;
         std::fs::write(&path, content)?;
         Ok(())
     }
 
     pub fn config_path() -> Result<PathBuf> {
-        let proj_dirs = ProjectDirs::from("com", "profile-vault", "profile-vault")
-            .ok_or_else(|| VaultError::Config("Could not determine config directory".to_string()))?;
+        let proj_dirs =
+            ProjectDirs::from("com", "profile-vault", "profile-vault").ok_or_else(|| {
+                VaultError::Config("Could not determine config directory".to_string())
+            })?;
         Ok(proj_dirs.config_dir().join("config.json"))
     }
 
@@ -67,7 +68,11 @@ impl Config {
         self.locked_profiles.insert(key, profile);
     }
 
-    pub fn remove_locked_profile(&mut self, browser: &str, profile_id: &str) -> Option<LockedProfile> {
+    pub fn remove_locked_profile(
+        &mut self,
+        browser: &str,
+        profile_id: &str,
+    ) -> Option<LockedProfile> {
         let key = Self::profile_key(browser, profile_id);
         self.locked_profiles.remove(&key)
     }

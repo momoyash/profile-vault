@@ -14,17 +14,17 @@ pub struct Crypto;
 
 impl Crypto {
     pub fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
-        let salt_string = SaltString::encode_b64(salt)
-            .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
+        let salt_string =
+            SaltString::encode_b64(salt).map_err(|e| VaultError::EncryptionError(e.to_string()))?;
 
         let argon2 = Argon2::default();
         let hash = argon2
             .hash_password(password.as_bytes(), &salt_string)
             .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
 
-        let hash_bytes = hash.hash.ok_or_else(|| {
-            VaultError::EncryptionError("Failed to get hash bytes".to_string())
-        })?;
+        let hash_bytes = hash
+            .hash
+            .ok_or_else(|| VaultError::EncryptionError("Failed to get hash bytes".to_string()))?;
 
         let mut key = [0u8; 32];
         key.copy_from_slice(&hash_bytes.as_bytes()[..32]);

@@ -26,22 +26,18 @@ impl Vault {
     pub fn lock_profile(&mut self, profile: &ProfileInfo, password: &str) -> Result<()> {
         let browser_name = profile.browser.name();
 
-        // Check if already locked
         if self.config.is_locked(browser_name, &profile.id) {
             return Err(VaultError::AlreadyLocked);
         }
 
-        // Check if profile exists
         if !profile.path.exists() {
             return Err(VaultError::ProfileNotFound(profile.display()));
         }
 
-        // Check if browser is running
         if is_browser_running(&profile.browser) {
             return Err(VaultError::ProfileInUse);
         }
 
-        // Create vault directory
         let vault_dir = Config::vault_dir()?;
         let vault_file = vault_dir.join(format!(
             "{}_{}.vault",
@@ -49,19 +45,12 @@ impl Vault {
             profile.id.replace(" ", "_")
         ));
 
-        // Zip the profile directory
         let zip_data = zip_directory(&profile.path)?;
-
-        // Encrypt the zip data
         let encrypted = Crypto::encrypt(&zip_data, password)?;
 
-        // Write to vault file
         fs::write(&vault_file, &encrypted)?;
-
-        // Remove original profile directory (send to recycle bin conceptually, but for reliability we'll just remove)
         fs::remove_dir_all(&profile.path)?;
 
-        // Update config
         let locked_profile = LockedProfile {
             browser: browser_name.to_string(),
             profile_id: profile.id.clone(),
@@ -76,33 +65,30 @@ impl Vault {
         Ok(())
     }
 
-    pub fn unlock_profile(&mut self, browser: &Browser, profile_id: &str, password: &str) -> Result<()> {
+    pub fn unlock_profile(
+        &mut self,
+        browser: &Browser,
+        profile_id: &str,
+        password: &str,
+    ) -> Result<()> {
         let browser_name = browser.name();
 
-        // Get locked profile info
-        let locked_profile = self.config
+        let locked_profile = self
+            .config
             .get_locked_profile(browser_name, profile_id)
             .ok_or(VaultError::NotLocked)?
             .clone();
 
-        // Read vault file
         let encrypted = fs::read(&locked_profile.vault_path)?;
-
-        // Decrypt
         let zip_data = Crypto::decrypt(&encrypted, password)?;
 
-        // Ensure parent directory exists
         if let Some(parent) = locked_profile.original_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        // Unzip to original location
         unzip_to_directory(&zip_data, &locked_profile.original_path)?;
-
-        // Remove vault file
         fs::remove_file(&locked_profile.vault_path)?;
 
-        // Update config
         self.config.remove_locked_profile(browser_name, profile_id);
         self.config.save()?;
 
@@ -123,8 +109,8 @@ fn zip_directory(path: &Path) -> Result<Vec<u8>> {
     {
         let cursor = std::io::Cursor::new(&mut buffer);
         let mut zip = ZipWriter::new(cursor);
-        let options = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         for entry in WalkDir::new(path) {
             let entry = entry?;
@@ -147,20 +133,22 @@ fn zip_directory(path: &Path) -> Result<Vec<u8>> {
             }
         }
 
-        zip.finish().map_err(|e| VaultError::EncryptionError(e.to_string()))?;
+        zip.finish()
+            .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
     }
     Ok(buffer)
 }
 
 fn unzip_to_directory(data: &[u8], dest: &Path) -> Result<()> {
     let cursor = std::io::Cursor::new(data);
-    let mut archive = ZipArchive::new(cursor)
-        .map_err(|e| VaultError::DecryptionError(e.to_string()))?;
+    let mut archive =
+        ZipArchive::new(cursor).map_err(|e| VaultError::DecryptionError(e.to_string()))?;
 
     fs::create_dir_all(dest)?;
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)
+        let mut file = archive
+            .by_index(i)
             .map_err(|e| VaultError::DecryptionError(e.to_string()))?;
 
         let outpath = dest.join(file.name());

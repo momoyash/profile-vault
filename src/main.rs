@@ -25,8 +25,18 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::List { browser } => cmd_list(browser),
-        Commands::Lock { browser, profile, password } => cmd_lock(&browser, &profile, password),
-        Commands::Unlock { browser, profile, password, launch, auto_lock } => cmd_unlock(&browser, &profile, password, launch, auto_lock),
+        Commands::Lock {
+            browser,
+            profile,
+            password,
+        } => cmd_lock(&browser, &profile, password),
+        Commands::Unlock {
+            browser,
+            profile,
+            password,
+            launch,
+            auto_lock,
+        } => cmd_unlock(&browser, &profile, password, launch, auto_lock),
         Commands::Status => cmd_status(),
         Commands::Browsers => cmd_browsers(),
     }
@@ -92,7 +102,6 @@ fn cmd_lock(browser_name: &str, profile_id: &str, password_arg: Option<String>) 
         profile.display()
     );
 
-    // Get password from argument or prompt
     let password = match password_arg {
         Some(p) => p,
         None => {
@@ -103,14 +112,18 @@ fn cmd_lock(browser_name: &str, profile_id: &str, password_arg: Option<String>) 
                 .map_err(|e| error::VaultError::Config(e.to_string()))?;
 
             if p != confirm {
-                return Err(error::VaultError::Config("Passwords do not match".to_string()));
+                return Err(error::VaultError::Config(
+                    "Passwords do not match".to_string(),
+                ));
             }
             p
         }
     };
 
     if password.len() < 4 {
-        return Err(error::VaultError::Config("Password must be at least 4 characters".to_string()));
+        return Err(error::VaultError::Config(
+            "Password must be at least 4 characters".to_string(),
+        ));
     }
 
     let mut vault = Vault::new()?;
@@ -121,12 +134,21 @@ fn cmd_lock(browser_name: &str, profile_id: &str, password_arg: Option<String>) 
         "✓".green().bold(),
         profile.display()
     );
-    println!("{}", "The encrypted profile is stored safely. Use 'unlock' to restore it.".dimmed());
+    println!(
+        "{}",
+        "The encrypted profile is stored safely. Use 'unlock' to restore it.".dimmed()
+    );
 
     Ok(())
 }
 
-fn cmd_unlock(browser_name: &str, profile_id: &str, password_arg: Option<String>, launch: bool, auto_lock: bool) -> Result<()> {
+fn cmd_unlock(
+    browser_name: &str,
+    profile_id: &str,
+    password_arg: Option<String>,
+    launch: bool,
+    auto_lock: bool,
+) -> Result<()> {
     let browser = Browser::from_str(browser_name)?;
 
     println!(
@@ -152,19 +174,23 @@ fn cmd_unlock(browser_name: &str, profile_id: &str, password_arg: Option<String>
     );
 
     if auto_lock {
-        println!("{}", "Launching browser (will auto-lock when closed)...".dimmed());
+        println!(
+            "{}",
+            "Launching browser (will auto-lock when closed)...".dimmed()
+        );
         launch_browser(&browser, profile_id)?;
 
-        // Wait a moment for browser to start
         std::thread::sleep(std::time::Duration::from_secs(3));
 
         println!("{}", "Waiting for browser to close...".dimmed());
         wait_for_browser_close(&browser);
 
-        // Re-lock with same password
         println!("{}", "Browser closed. Re-locking profile...".dimmed());
         let profiles = browser.list_profiles()?;
-        if let Some(profile) = profiles.into_iter().find(|p| p.id.eq_ignore_ascii_case(profile_id)) {
+        if let Some(profile) = profiles
+            .into_iter()
+            .find(|p| p.id.eq_ignore_ascii_case(profile_id))
+        {
             let mut vault = Vault::new()?;
             vault.lock_profile(&profile, &password)?;
             println!(
@@ -233,7 +259,10 @@ fn launch_browser(browser: &Browser, profile_id: &str) -> Result<()> {
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             ];
-            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
+            paths
+                .iter()
+                .find(|p| std::path::Path::new(p).exists())
+                .copied()
         }
         Browser::Edge => Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
         Browser::Brave => {
@@ -241,14 +270,20 @@ fn launch_browser(browser: &Browser, profile_id: &str) -> Result<()> {
                 r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
                 r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
             ];
-            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
+            paths
+                .iter()
+                .find(|p| std::path::Path::new(p).exists())
+                .copied()
         }
         Browser::Firefox => {
             let paths = [
                 r"C:\Program Files\Mozilla Firefox\firefox.exe",
                 r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
             ];
-            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
+            paths
+                .iter()
+                .find(|p| std::path::Path::new(p).exists())
+                .copied()
         }
         Browser::Chromium => None,
     };
@@ -262,58 +297,15 @@ fn launch_browser(browser: &Browser, profile_id: &str) -> Result<()> {
             cmd.args(["-P", profile_id]);
         }
 
-        cmd.spawn().map_err(|e| error::VaultError::Io(e))?;
+        cmd.spawn().map_err(error::VaultError::Io)?;
     } else {
-        println!("{}", "Could not find browser executable. Please launch manually.".yellow());
+        println!(
+            "{}",
+            "Could not find browser executable. Please launch manually.".yellow()
+        );
     }
 
     Ok(())
-}
-
-fn launch_browser_wait(browser: &Browser, profile_id: &str) -> Result<Option<std::process::Child>> {
-    use std::process::Command;
-
-    let exe = match browser {
-        Browser::Chrome => {
-            let paths = [
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            ];
-            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
-        }
-        Browser::Edge => Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        Browser::Brave => {
-            let paths = [
-                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-                r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-            ];
-            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
-        }
-        Browser::Firefox => {
-            let paths = [
-                r"C:\Program Files\Mozilla Firefox\firefox.exe",
-                r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
-            ];
-            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
-        }
-        Browser::Chromium => None,
-    };
-
-    if let Some(exe_path) = exe {
-        let mut cmd = Command::new(exe_path);
-
-        if browser.is_chromium_based() {
-            cmd.arg(format!("--profile-directory={}", profile_id));
-        } else if *browser == Browser::Firefox {
-            cmd.args(["-P", profile_id]);
-        }
-
-        let child = cmd.spawn().map_err(|e| error::VaultError::Io(e))?;
-        Ok(Some(child))
-    } else {
-        println!("{}", "Could not find browser executable. Please launch manually.".yellow());
-        Ok(None)
-    }
 }
 
 fn wait_for_browser_close(browser: &Browser) {
