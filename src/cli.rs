@@ -47,6 +47,10 @@ pub enum Commands {
         /// Launch browser after unlocking
         #[arg(short, long)]
         launch: bool,
+
+        /// Auto-lock when browser closes (implies --launch)
+        #[arg(short, long)]
+        auto_lock: bool,
     },
 
     /// Show status of locked profiles

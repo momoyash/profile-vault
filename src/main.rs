@@ -26,7 +26,7 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::List { browser } => cmd_list(browser),
         Commands::Lock { browser, profile, password } => cmd_lock(&browser, &profile, password),
-        Commands::Unlock { browser, profile, password, launch } => cmd_unlock(&browser, &profile, password, launch),
+        Commands::Unlock { browser, profile, password, launch, auto_lock } => cmd_unlock(&browser, &profile, password, launch, auto_lock),
         Commands::Status => cmd_status(),
         Commands::Browsers => cmd_browsers(),
     }
@@ -126,7 +126,7 @@ fn cmd_lock(browser_name: &str, profile_id: &str, password_arg: Option<String>) 
     Ok(())
 }
 
-fn cmd_unlock(browser_name: &str, profile_id: &str, password_arg: Option<String>, launch: bool) -> Result<()> {
+fn cmd_unlock(browser_name: &str, profile_id: &str, password_arg: Option<String>, launch: bool, auto_lock: bool) -> Result<()> {
     let browser = Browser::from_str(browser_name)?;
 
     println!(
@@ -151,7 +151,29 @@ fn cmd_unlock(browser_name: &str, profile_id: &str, password_arg: Option<String>
         profile_id
     );
 
-    if launch {
+    if auto_lock {
+        println!("{}", "Launching browser (will auto-lock when closed)...".dimmed());
+        launch_browser(&browser, profile_id)?;
+
+        // Wait a moment for browser to start
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        println!("{}", "Waiting for browser to close...".dimmed());
+        wait_for_browser_close(&browser);
+
+        // Re-lock with same password
+        println!("{}", "Browser closed. Re-locking profile...".dimmed());
+        let profiles = browser.list_profiles()?;
+        if let Some(profile) = profiles.into_iter().find(|p| p.id.eq_ignore_ascii_case(profile_id)) {
+            let mut vault = Vault::new()?;
+            vault.lock_profile(&profile, &password)?;
+            println!(
+                "{} Profile '{}' is now locked again.",
+                "✓".green().bold(),
+                profile_id
+            );
+        }
+    } else if launch {
         println!("{}", "Launching browser...".dimmed());
         launch_browser(&browser, profile_id)?;
     }
@@ -246,4 +268,74 @@ fn launch_browser(browser: &Browser, profile_id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn launch_browser_wait(browser: &Browser, profile_id: &str) -> Result<Option<std::process::Child>> {
+    use std::process::Command;
+
+    let exe = match browser {
+        Browser::Chrome => {
+            let paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ];
+            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
+        }
+        Browser::Edge => Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        Browser::Brave => {
+            let paths = [
+                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+            ];
+            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
+        }
+        Browser::Firefox => {
+            let paths = [
+                r"C:\Program Files\Mozilla Firefox\firefox.exe",
+                r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+            ];
+            paths.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s)
+        }
+        Browser::Chromium => None,
+    };
+
+    if let Some(exe_path) = exe {
+        let mut cmd = Command::new(exe_path);
+
+        if browser.is_chromium_based() {
+            cmd.arg(format!("--profile-directory={}", profile_id));
+        } else if *browser == Browser::Firefox {
+            cmd.args(["-P", profile_id]);
+        }
+
+        let child = cmd.spawn().map_err(|e| error::VaultError::Io(e))?;
+        Ok(Some(child))
+    } else {
+        println!("{}", "Could not find browser executable. Please launch manually.".yellow());
+        Ok(None)
+    }
+}
+
+fn wait_for_browser_close(browser: &Browser) {
+    use std::process::Command;
+
+    let exe_name = browser.executable_name();
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {}", exe_name)])
+            .output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if !stdout.contains(exe_name) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
