@@ -1,0 +1,57 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "profile-vault")]
+#[command(author = "momoyash")]
+#[command(version = "0.1.0")]
+#[command(about = "Password-protect browser profiles with real encryption", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// List all browser profiles and their lock status
+    List {
+        /// Filter by browser (chrome, edge, firefox, brave)
+        #[arg(short, long)]
+        browser: Option<String>,
+    },
+
+    /// Lock a browser profile with a password
+    Lock {
+        /// Browser name (chrome, edge, firefox, brave)
+        browser: String,
+
+        /// Profile ID (e.g., "Default", "Profile 1")
+        profile: String,
+
+        /// Password (if not provided, will prompt interactively)
+        #[arg(short, long)]
+        password: Option<String>,
+    },
+
+    /// Unlock a locked browser profile
+    Unlock {
+        /// Browser name (chrome, edge, firefox, brave)
+        browser: String,
+
+        /// Profile ID (e.g., "Default", "Profile 1")
+        profile: String,
+
+        /// Password (if not provided, will prompt interactively)
+        #[arg(short, long)]
+        password: Option<String>,
+
+        /// Launch browser after unlocking
+        #[arg(short, long)]
+        launch: bool,
+    },
+
+    /// Show status of locked profiles
+    Status,
+
+    /// List supported browsers
+    Browsers,
+}

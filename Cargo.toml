@@ -1,0 +1,45 @@
+[package]
+name = "profile-vault"
+version = "0.1.0"
+edition = "2021"
+authors = ["momoyash"]
+description = "Password-protect browser profiles with real encryption"
+license = "MIT"
+repository = "https://github.com/momoyash/profile-vault"
+keywords = ["browser", "encryption", "privacy", "security"]
+categories = ["command-line-utilities", "cryptography"]
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Encryption
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# File handling
+walkdir = "2"
+zip = "2"
+tempfile = "3"
+
+# Terminal
+rpassword = "7"
+colored = "2"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Platform-specific
+directories = "5"
+chrono = "0.4"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
