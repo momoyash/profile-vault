@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "profile-vault")]
 #[command(author = "momoyash")]
-#[command(version = "0.2.0")]
+#[command(version)]
 #[command(about = "Password-protect browser profiles with real encryption", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
@@ -50,7 +50,7 @@ pub enum Commands {
         password: Option<String>,
 
         /// Unlock using the recovery phrase instead of the password.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["password", "auto_lock"])]
         recovery: bool,
 
         /// Launch browser after unlocking

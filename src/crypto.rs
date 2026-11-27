@@ -61,9 +61,18 @@ pub fn random_uuid_bytes() -> [u8; 16] {
 
 /// Derive the password-KEK using Argon2id with the parameters stored in the
 /// vault header. The password is wiped on drop.
-pub fn derive_kek_argon2(password: &Zeroizing<String>, salt: &[u8; SALT_LEN], params: &KdfParams) -> Result<Key> {
-    let p = Params::new(params.m_cost_kib, params.t_cost, params.p_cost as u32, Some(KEY_LEN))
-        .map_err(|e| VaultError::EncryptionError(format!("argon2 params: {e}")))?;
+pub fn derive_kek_argon2(
+    password: &Zeroizing<String>,
+    salt: &[u8; SALT_LEN],
+    params: &KdfParams,
+) -> Result<Key> {
+    let p = Params::new(
+        params.m_cost_kib,
+        params.t_cost,
+        params.p_cost as u32,
+        Some(KEY_LEN),
+    )
+    .map_err(|e| VaultError::EncryptionError(format!("argon2 params: {e}")))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, p);
 
     let mut out = [0u8; KEY_LEN];
@@ -101,7 +110,13 @@ pub fn wrap_dek(kek: &Key, dek: &Key, aad: &[u8]) -> Result<[u8; WRAPPED_DEK_LEN
     let nonce_bytes = random_nonce();
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ct = c
-        .encrypt(nonce, Payload { msg: dek.as_bytes(), aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: dek.as_bytes(),
+                aad,
+            },
+        )
         .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
     debug_assert_eq!(ct.len(), KEY_LEN + TAG_LEN);
 
@@ -115,7 +130,13 @@ pub fn unwrap_dek(kek: &Key, wrapped: &[u8; WRAPPED_DEK_LEN], aad: &[u8]) -> Res
     let c = cipher(kek)?;
     let nonce = Nonce::from_slice(&wrapped[..NONCE_LEN]);
     let pt = c
-        .decrypt(nonce, Payload { msg: &wrapped[NONCE_LEN..], aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &wrapped[NONCE_LEN..],
+                aad,
+            },
+        )
         .map_err(|_| VaultError::InvalidPassword)?;
     let mut dek = [0u8; KEY_LEN];
     dek.copy_from_slice(&pt);
@@ -131,7 +152,13 @@ pub fn make_kek_check(kek: &Key, aad: &[u8]) -> Result<[u8; KEK_CHECK_LEN]> {
     let nonce_bytes = random_nonce();
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ct = c
-        .encrypt(nonce, Payload { msg: KEK_CHECK_PLAINTEXT, aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: KEK_CHECK_PLAINTEXT,
+                aad,
+            },
+        )
         .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
     let mut out = [0u8; KEK_CHECK_LEN];
     out[..NONCE_LEN].copy_from_slice(&nonce_bytes);
@@ -143,7 +170,13 @@ pub fn verify_kek_check(kek: &Key, block: &[u8; KEK_CHECK_LEN], aad: &[u8]) -> R
     let c = cipher(kek)?;
     let nonce = Nonce::from_slice(&block[..NONCE_LEN]);
     let pt = c
-        .decrypt(nonce, Payload { msg: &block[NONCE_LEN..], aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &block[NONCE_LEN..],
+                aad,
+            },
+        )
         .map_err(|_| VaultError::InvalidPassword)?;
     if pt != KEK_CHECK_PLAINTEXT {
         return Err(VaultError::InvalidPassword);
@@ -163,7 +196,13 @@ pub fn encrypt_chunk(
     let nonce = Nonce::from_slice(&nonce_bytes);
     let aad = chunk_aad(vault_uuid, chunk_idx);
     let ct = c
-        .encrypt(nonce, Payload { msg: plaintext, aad: &aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
         .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
 
     let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
@@ -184,8 +223,14 @@ pub fn decrypt_chunk(
     let c = cipher(dek)?;
     let nonce = Nonce::from_slice(&on_disk[..NONCE_LEN]);
     let aad = chunk_aad(vault_uuid, chunk_idx);
-    c.decrypt(nonce, Payload { msg: &on_disk[NONCE_LEN..], aad: &aad })
-        .map_err(|e| VaultError::DecryptionError(format!("chunk {chunk_idx}: {e}")))
+    c.decrypt(
+        nonce,
+        Payload {
+            msg: &on_disk[NONCE_LEN..],
+            aad: &aad,
+        },
+    )
+    .map_err(|e| VaultError::DecryptionError(format!("chunk {chunk_idx}: {e}")))
 }
 
 #[cfg(test)]
@@ -206,7 +251,11 @@ mod tests {
     fn argon2_kek_is_deterministic() {
         let pw = Zeroizing::new(String::from("hunter2"));
         let salt = [9u8; SALT_LEN];
-        let p = KdfParams { m_cost_kib: 19 * 1024, t_cost: 2, p_cost: 1 };
+        let p = KdfParams {
+            m_cost_kib: 19 * 1024,
+            t_cost: 2,
+            p_cost: 1,
+        };
         let k1 = derive_kek_argon2(&pw, &salt, &p).unwrap();
         let k2 = derive_kek_argon2(&pw, &salt, &p).unwrap();
         assert_eq!(k1.as_bytes(), k2.as_bytes());

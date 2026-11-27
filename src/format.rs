@@ -134,8 +134,7 @@ impl Header {
         let hash = blake3::hash(&buf[..OFF_HASH_INPUT_END]);
         buf[OFF_HEADER_HASH..OFF_HEADER_HASH + 32].copy_from_slice(hash.as_bytes());
 
-        buf[OFF_WRAPPED_DEK..OFF_WRAPPED_DEK + WRAPPED_DEK_LEN]
-            .copy_from_slice(&self.wrapped_dek);
+        buf[OFF_WRAPPED_DEK..OFF_WRAPPED_DEK + WRAPPED_DEK_LEN].copy_from_slice(&self.wrapped_dek);
         buf[OFF_KEK_CHECK..OFF_KEK_CHECK + KEK_CHECK_LEN].copy_from_slice(&self.kek_check);
 
         if let Some(rec) = &self.wrapped_recovery_dek {
@@ -178,13 +177,24 @@ impl Header {
             t_cost: u32::from_le_bytes(buf[OFF_KDF_T..OFF_KDF_T + 4].try_into().unwrap()),
             p_cost: buf[OFF_KDF_P],
         };
+        if !(8..=1024 * 1024).contains(&kdf.m_cost_kib)
+            || !(1..=16).contains(&kdf.t_cost)
+            || !(1..=32).contains(&kdf.p_cost)
+        {
+            return Err(VaultError::Corrupt(
+                "KDF parameters exceed supported limits".into(),
+            ));
+        }
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&buf[OFF_SALT..OFF_SALT + SALT_LEN]);
         let aead_id = buf[OFF_AEAD_ID];
         let chunk_size =
             u32::from_le_bytes(buf[OFF_CHUNK_SIZE..OFF_CHUNK_SIZE + 4].try_into().unwrap());
-        let chunk_count =
-            u64::from_le_bytes(buf[OFF_CHUNK_COUNT..OFF_CHUNK_COUNT + 8].try_into().unwrap());
+        let chunk_count = u64::from_le_bytes(
+            buf[OFF_CHUNK_COUNT..OFF_CHUNK_COUNT + 8]
+                .try_into()
+                .unwrap(),
+        );
 
         let mut wrapped_dek = [0u8; WRAPPED_DEK_LEN];
         wrapped_dek.copy_from_slice(&buf[OFF_WRAPPED_DEK..OFF_WRAPPED_DEK + WRAPPED_DEK_LEN]);

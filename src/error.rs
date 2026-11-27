@@ -38,9 +38,6 @@ pub enum VaultError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Walk error: {0}")]
-    Walk(#[from] walkdir::Error),
-
     #[error("Config error: {0}")]
     Config(String),
 }

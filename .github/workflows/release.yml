@@ -51,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive `
-            -Path target/${{ matrix.target }}/release/profile-vault.exe `
+            -Path target/${{ matrix.target }}/release/profile-vault.exe,target/${{ matrix.target }}/release/profile-vault-desktop.exe `
             -DestinationPath profile-vault-${{ matrix.target }}.zip
 
       - name: Package (Unix)

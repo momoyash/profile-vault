@@ -30,12 +30,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Format check
-        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Build
         run: cargo build --release --locked

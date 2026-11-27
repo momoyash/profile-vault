@@ -67,7 +67,21 @@ fn cmd_list(browser_filter: Option<String>) -> Result<()> {
 
         println!("\n{} {}", "Browser:".bold(), browser.name().cyan());
 
-        let profiles = browser.list_profiles()?;
+        let mut profiles = browser.list_profiles()?;
+        for locked in vault
+            .list_locked()
+            .into_iter()
+            .filter(|p| p.browser == browser.name())
+        {
+            if !profiles.iter().any(|p| p.id == locked.profile_id) {
+                profiles.push(browser::ProfileInfo {
+                    id: locked.profile_id.clone(),
+                    name: locked.profile_name.clone(),
+                    path: locked.original_path.clone(),
+                    browser,
+                });
+            }
+        }
         if profiles.is_empty() {
             println!("  {}", "No profiles found".dimmed());
             continue;
@@ -81,11 +95,7 @@ fn cmd_list(browser_filter: Option<String>) -> Result<()> {
                 "unlocked".green()
             };
 
-            println!(
-                "  {} [{}]",
-                profile.display(),
-                status
-            );
+            println!("  {} [{}]", profile.display(), status);
         }
     }
 
@@ -151,7 +161,10 @@ fn cmd_lock(
     if let Some(rec) = result.recovery {
         println!();
         println!("{}", "RECOVERY PHRASE — write this down NOW".red().bold());
-        println!("{}", "This is the ONLY way to unlock the vault without your password.".dimmed());
+        println!(
+            "{}",
+            "This is the ONLY way to unlock the vault without your password.".dimmed()
+        );
         println!("{}", "It will not be shown again.".dimmed());
         println!();
         for (i, word) in rec.mnemonic.split_whitespace().enumerate() {
@@ -210,6 +223,7 @@ fn cmd_unlock(
         Some(password)
     };
 
+    drop(vault);
     println!(
         "\n{} Profile '{}' is now unlocked.",
         "✓".green().bold(),
@@ -314,57 +328,13 @@ fn cmd_browsers() -> Result<()> {
 fn launch_browser(browser: &Browser, profile_id: &str) -> Result<()> {
     use std::process::Command;
 
-    let exe = match browser {
-        Browser::Chrome => {
-            let paths = [
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            ];
-            paths
-                .iter()
-                .find(|p| std::path::Path::new(p).exists())
-                .copied()
-        }
-        Browser::Edge => Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        Browser::Brave => {
-            let paths = [
-                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-                r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-            ];
-            paths
-                .iter()
-                .find(|p| std::path::Path::new(p).exists())
-                .copied()
-        }
-        Browser::Firefox => {
-            let paths = [
-                r"C:\Program Files\Mozilla Firefox\firefox.exe",
-                r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
-            ];
-            paths
-                .iter()
-                .find(|p| std::path::Path::new(p).exists())
-                .copied()
-        }
-        Browser::Chromium => None,
-    };
-
-    if let Some(exe_path) = exe {
-        let mut cmd = Command::new(exe_path);
-
-        if browser.is_chromium_based() {
-            cmd.arg(format!("--profile-directory={}", profile_id));
-        } else if *browser == Browser::Firefox {
-            cmd.args(["-P", profile_id]);
-        }
-
-        cmd.spawn().map_err(error::VaultError::Io)?;
+    let mut cmd = Command::new(browser.executable_path()?);
+    if browser.is_chromium_based() {
+        cmd.arg(format!("--profile-directory={profile_id}"));
     } else {
-        println!(
-            "{}",
-            "Could not find browser executable. Please launch manually.".yellow()
-        );
+        cmd.arg("-profile")
+            .arg(browser.profiles_dir()?.join(profile_id));
     }
-
+    cmd.spawn().map_err(error::VaultError::Io)?;
     Ok(())
 }

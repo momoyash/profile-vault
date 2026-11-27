@@ -114,6 +114,54 @@ impl Browser {
         }
     }
 
+    pub fn executable_path(&self) -> Result<PathBuf> {
+        #[cfg(windows)]
+        {
+            let relative = match self {
+                Self::Chrome => r"Google\Chrome\Application\chrome.exe",
+                Self::Brave => r"BraveSoftware\Brave-Browser\Application\brave.exe",
+                Self::Edge => r"Microsoft\Edge\Application\msedge.exe",
+                Self::Firefox => r"Mozilla Firefox\firefox.exe",
+                Self::Chromium => r"Chromium\Application\chromium.exe",
+            };
+            [
+                "ProgramW6432",
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "LOCALAPPDATA",
+            ]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(|root| PathBuf::from(root).join(relative))
+            .find(|path| path.is_file())
+            .ok_or_else(|| VaultError::Config(format!("Cannot find {} executable", self.name())))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let app = match self {
+                Self::Chrome => "Google Chrome",
+                Self::Brave => "Brave Browser",
+                Self::Edge => "Microsoft Edge",
+                Self::Firefox => "Firefox",
+                Self::Chromium => "Chromium",
+            };
+            Ok(PathBuf::from(format!(
+                "/Applications/{app}.app/Contents/MacOS/{app}"
+            )))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let command = match self {
+                Self::Chrome => "google-chrome",
+                Self::Brave => "brave-browser",
+                Self::Edge => "microsoft-edge",
+                Self::Firefox => "firefox",
+                Self::Chromium => "chromium",
+            };
+            Ok(PathBuf::from(command))
+        }
+    }
+
     pub fn is_chromium_based(&self) -> bool {
         matches!(
             self,
@@ -137,6 +185,14 @@ impl Browser {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                         if let Some(cache) = json["profile"]["info_cache"].as_object() {
                             for (id, info) in cache {
+                                if std::path::Path::new(id).components().count() != 1
+                                    || !matches!(
+                                        std::path::Path::new(id).components().next(),
+                                        Some(std::path::Component::Normal(_))
+                                    )
+                                {
+                                    continue;
+                                }
                                 let name = info["name"].as_str().unwrap_or(id).to_string();
                                 let path = profiles_dir.join(id);
                                 if path.is_dir() {

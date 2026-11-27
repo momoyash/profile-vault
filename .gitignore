@@ -9,3 +9,11 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Local vaults and browser data
+*.hc
+*.pvlt
+*.pvlt.tmp
+*.pvi
+*.lnk
+index.key

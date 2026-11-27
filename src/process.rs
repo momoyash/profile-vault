@@ -46,9 +46,9 @@ fn browser_process_running(browser: &Browser) -> bool {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             // tasklist prints "INFO: No tasks are running..." when nothing matches.
-            stdout.contains(exe)
+            !out.status.success() || stdout.to_ascii_lowercase().contains(exe)
         }
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
@@ -57,12 +57,13 @@ fn browser_process_running(browser: &Browser) -> bool {
     let exe = browser.executable_name();
     let bare = exe.trim_end_matches(".exe");
     let output = Command::new("pgrep").arg("-x").arg(bare).output();
-    matches!(output, Ok(out) if out.status.success() && !out.stdout.is_empty())
+    match output {
+        Ok(out) => out.status.code() != Some(1),
+        Err(_) => true,
+    }
 }
 
 /// Block until the browser process has exited. Polls every 2 seconds.
-/// (Event-driven waiting via `WaitForSingleObject` / `pidfd_open` is on the
-/// v0.5 roadmap.)
 pub fn wait_for_close(browser: &Browser) {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(2));

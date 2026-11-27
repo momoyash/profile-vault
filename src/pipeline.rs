@@ -22,7 +22,6 @@ pub struct ChunkedEncryptWriter<W: Write> {
     buffer: Vec<u8>,
     chunk_size: usize,
     chunk_idx: u64,
-    finished: bool,
 }
 
 impl<W: Write> ChunkedEncryptWriter<W> {
@@ -34,13 +33,12 @@ impl<W: Write> ChunkedEncryptWriter<W> {
             buffer: Vec::with_capacity(CHUNK_SIZE as usize),
             chunk_size: CHUNK_SIZE as usize,
             chunk_idx: 0,
-            finished: false,
         }
     }
 
     fn emit_chunk(&mut self, data: &[u8]) -> io::Result<()> {
         let out = encrypt_chunk(&self.dek, &self.vault_uuid, self.chunk_idx, data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         self.inner.write_all(&out)?;
         self.chunk_idx += 1;
         Ok(())
@@ -49,25 +47,26 @@ impl<W: Write> ChunkedEncryptWriter<W> {
     /// Flushes the trailing partial chunk (if any) and returns the inner
     /// writer along with the total chunk count written.
     pub fn finish(mut self) -> io::Result<(W, u64)> {
-        if self.finished {
-            return Err(io::Error::new(io::ErrorKind::Other, "already finished"));
-        }
         if !self.buffer.is_empty() {
             let buf = std::mem::take(&mut self.buffer);
             self.emit_chunk(&buf)?;
         }
-        self.finished = true;
         Ok((self.inner, self.chunk_idx))
     }
 }
 
 impl<W: Write> Write for ChunkedEncryptWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buffer.extend_from_slice(buf);
-        while self.buffer.len() >= self.chunk_size {
-            let rest = self.buffer.split_off(self.chunk_size);
-            let chunk = std::mem::replace(&mut self.buffer, rest);
-            self.emit_chunk(&chunk)?;
+        let mut remaining = buf;
+        while !remaining.is_empty() {
+            let n = remaining.len().min(self.chunk_size - self.buffer.len());
+            self.buffer.extend_from_slice(&remaining[..n]);
+            remaining = &remaining[n..];
+            if self.buffer.len() == self.chunk_size {
+                let chunk =
+                    std::mem::replace(&mut self.buffer, Vec::with_capacity(self.chunk_size));
+                self.emit_chunk(&chunk)?;
+            }
         }
         Ok(buf.len())
     }
@@ -149,13 +148,11 @@ impl<R: Read> ChunkedDecryptReader<R> {
 
 impl<R: Read> Read for ChunkedDecryptReader<R> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if self.exhausted && self.buffer_pos >= self.buffer.len() {
+        if out.is_empty() || (self.exhausted && self.buffer_pos >= self.buffer.len()) {
             return Ok(0);
         }
-        if self.buffer_pos >= self.buffer.len() {
-            if !self.pull_chunk()? {
-                return Ok(0);
-            }
+        if self.buffer_pos >= self.buffer.len() && !self.pull_chunk()? {
+            return Ok(0);
         }
         let n = std::cmp::min(out.len(), self.buffer.len() - self.buffer_pos);
         out[..n].copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + n]);
@@ -195,12 +192,21 @@ mod tests {
     }
 
     #[test]
+    fn empty_read_does_not_consume_or_authenticate_a_chunk() {
+        let mut reader = ChunkedDecryptReader::new(Cursor::new(vec![]), Key([7; 32]), [11; 16], 1);
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+        assert_eq!(
+            reader.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
     fn tampered_chunk_fails() {
         let dek = Key([7u8; 32]);
         let vault_uuid = [11u8; 16];
         let mut out = Vec::new();
-        let mut writer =
-            ChunkedEncryptWriter::new(&mut out, Key(*dek.as_bytes()), vault_uuid);
+        let mut writer = ChunkedEncryptWriter::new(&mut out, Key(*dek.as_bytes()), vault_uuid);
         writer.write_all(b"hello world").unwrap();
         let (_, n) = writer.finish().unwrap();
         assert_eq!(n, 1);

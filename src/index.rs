@@ -2,12 +2,9 @@
 //!
 //! Records which vaults exist and where they live. Encrypted at rest under a
 //! per-install key kept in `<data_dir>/index.key` with restrictive
-//! permissions. This is a v0.2 stopgap: a same-user attacker who can read the
+//! permissions. A same-user attacker who can read the
 //! data dir gets both halves. The intent here is just to keep cloud-sync /
 //! backup software from snapshotting plaintext metadata.
-//!
-//! v0.5 will move this key into the OS keyring (Credential Manager / Keychain
-//! / Secret Service).
 
 use std::collections::HashMap;
 use std::fs;
@@ -181,14 +178,20 @@ fn write_key_restricted(path: &std::path::Path, key: &[u8; KEY_LEN]) -> Result<(
 }
 
 fn encrypt(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|e| VaultError::EncryptionError(e.to_string()))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let aad = build_aad();
     let ct = cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad: &aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
         .map_err(|e| VaultError::EncryptionError(e.to_string()))?;
 
     let mut out = Vec::with_capacity(aad.len() + NONCE_LEN + ct.len());
@@ -209,13 +212,14 @@ fn decrypt(blob: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
     }
     let version = u16::from_le_bytes(aad[4..6].try_into().unwrap());
     if version != INDEX_VERSION {
-        return Err(VaultError::Config(format!("unsupported index version {version}")));
+        return Err(VaultError::Config(format!(
+            "unsupported index version {version}"
+        )));
     }
     let nonce = Nonce::from_slice(&blob[aad_len..aad_len + NONCE_LEN]);
     let ct = &blob[aad_len + NONCE_LEN..];
 
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| VaultError::Config(e.to_string()))?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| VaultError::Config(e.to_string()))?;
     cipher
         .decrypt(nonce, Payload { msg: ct, aad })
         .map_err(|_| VaultError::Config("index decryption failed — key or file corrupt".into()))

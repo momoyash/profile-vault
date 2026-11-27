@@ -18,7 +18,7 @@
 //! pending_delete tells us what's left to clean up.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -27,8 +27,8 @@ use zeroize::Zeroizing;
 
 use crate::browser::{Browser, ProfileInfo};
 use crate::crypto::{
-    derive_kek_argon2, derive_kek_hkdf, make_kek_check, random_salt, random_uuid_bytes,
-    unwrap_dek, verify_kek_check, wrap_dek, Key,
+    derive_kek_argon2, derive_kek_hkdf, make_kek_check, random_salt, random_uuid_bytes, unwrap_dek,
+    verify_kek_check, wrap_dek, Key,
 };
 use crate::error::{Result, VaultError};
 use crate::format::{
@@ -48,14 +48,29 @@ pub struct LockResult {
 
 pub struct Vault {
     index: Index,
+    _guard: File,
 }
 
 impl Vault {
     pub fn new() -> Result<Self> {
+        let lock_path = Index::index_path()?.with_extension("lock");
+        fs::create_dir_all(lock_path.parent().unwrap())?;
+        let guard = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        guard
+            .try_lock()
+            .map_err(|_| VaultError::Config("Another archive operation is running".into()))?;
         let index = Index::load()?;
         // Best-effort: finish any plaintext deletion left dangling by a prior crash.
         reconcile_pending_delete(&index);
-        Ok(Self { index })
+        Ok(Self {
+            index,
+            _guard: guard,
+        })
     }
 
     pub fn is_locked(&self, browser: &Browser, profile_id: &str) -> bool {
@@ -87,108 +102,23 @@ impl Vault {
         }
 
         let vault_dir = Index::vault_dir()?;
-        let vault_final = vault_dir.join(format!(
-            "{}_{}.pvlt",
-            browser_name.to_lowercase(),
-            sanitize(&profile.id)
-        ));
-        let vault_tmp = vault_final.with_extension("pvlt.tmp");
-
-        let salt = random_salt();
-        let kdf = KdfParams::strong_default();
         let vault_uuid = random_uuid_bytes();
-        let dek = Key::random();
-        let kek = derive_kek_argon2(password, &salt, &kdf)?;
-
-        // Optional recovery slot: HKDF over mnemonic entropy.
-        let recovery = if with_recovery {
-            Some(recovery::generate()?)
-        } else {
-            None
-        };
-        let wrapped_recovery_dek = if let Some(rec) = &recovery {
-            let rec_kek = derive_kek_hkdf(&rec.entropy, &salt)?;
-            // Build a temporary header to compute AAD. The AAD covers
-            // everything in [0..AAD_END), which doesn't depend on chunk_count.
-            let placeholder = build_header(
-                &vault_uuid,
-                &salt,
-                &kdf,
-                with_recovery,
-                /*chunk_count=*/ 0,
-                [0u8; 60],
-                [0u8; 41],
-                None,
-            );
-            let aad = placeholder.aad();
-            Some(wrap_dek(&rec_kek, &dek, &aad)?)
-        } else {
-            None
-        };
-
-        // Open the .tmp, write a placeholder header, then stream chunks.
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(&vault_tmp)?;
-        file.write_all(&[0u8; HEADER_SIZE])?;
-
-        let dek_for_stream = Key(*dek.as_bytes());
-        let chunked = ChunkedEncryptWriter::new(file, dek_for_stream, vault_uuid);
-        let zstd = zstd::Encoder::new(chunked, ZSTD_LEVEL)
-            .map_err(|e| VaultError::EncryptionError(format!("zstd: {e}")))?;
-        let mut tar = tar::Builder::new(zstd);
-        // follow_symlinks=false: profiles can contain symlinks (rare); we
-        // archive the link, not the target.
-        tar.follow_symlinks(false);
-        tar.append_dir_all(".", &profile.path).map_err(|e| {
-            VaultError::EncryptionError(format!("tar append: {e}"))
-        })?;
-
-        let zstd = tar
-            .into_inner()
-            .map_err(|e| VaultError::EncryptionError(format!("tar finish: {e}")))?;
-        let chunked = zstd
-            .finish()
-            .map_err(|e| VaultError::EncryptionError(format!("zstd finish: {e}")))?;
-        let (mut file, chunk_count) = chunked
-            .finish()
-            .map_err(|e| VaultError::EncryptionError(format!("encrypt finish: {e}")))?;
-
-        // Build the final header now that chunk_count is known.
-        let placeholder = build_header(
-            &vault_uuid,
-            &salt,
-            &kdf,
+        let vault_final = vault_dir.join(format!("{}.pvlt", uuid::Uuid::from_bytes(vault_uuid)));
+        let temp = tempfile::Builder::new()
+            .prefix(".archive-")
+            .tempfile_in(&vault_dir)?;
+        let vault_tmp = temp.into_temp_path();
+        // write_archive creates its own file. The random name remains reserved
+        // by this command's exclusive archive lock.
+        fs::remove_file(&vault_tmp)?;
+        let recovery = write_archive(
+            &profile.path,
+            &vault_tmp,
+            password,
             with_recovery,
-            chunk_count,
-            [0; _],
-            [0; _],
-            wrapped_recovery_dek,
-        );
-        let aad = placeholder.aad();
-        let wrapped_dek_bytes = wrap_dek(&kek, &dek, &aad)?;
-        let kek_check_bytes = make_kek_check(&kek, &aad)?;
-
-        let final_header = build_header(
-            &vault_uuid,
-            &salt,
-            &kdf,
-            with_recovery,
-            chunk_count,
-            wrapped_dek_bytes,
-            kek_check_bytes,
-            wrapped_recovery_dek,
-        );
-
-        // Patch in the real header.
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&final_header.to_bytes())?;
-        file.seek(SeekFrom::End(0))?;
-        write_footer(&mut file)?;
-        file.sync_all()?;
-        drop(file);
+            vault_uuid,
+            KdfParams::strong_default(),
+        )?;
 
         // Atomic rename → vault is now durable.
         fs::rename(&vault_tmp, &vault_final)?;
@@ -259,45 +189,34 @@ impl Vault {
             .ok_or(VaultError::NotLocked)
     }
 
-    fn finish_unlock(
-        &mut self,
-        locked: &LockedProfile,
-        header: &Header,
-        dek: Key,
-    ) -> Result<()> {
-        // If the target path still exists (browser may have recreated an
-        // empty dir), wipe it before extraction. The user has authenticated;
-        // overwriting is the desired behavior.
-        if locked.original_path.exists() {
-            fs::remove_dir_all(&locked.original_path)?;
+    fn finish_unlock(&mut self, locked: &LockedProfile, header: &Header, dek: Key) -> Result<()> {
+        let browser = Browser::from_str(&locked.browser)?;
+        if is_profile_in_use(&browser, &locked.original_path) {
+            return Err(VaultError::ProfileInUse);
         }
-        if let Some(parent) = locked.original_path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = locked
+            .original_path
+            .parent()
+            .ok_or_else(|| VaultError::Config("Profile has no parent directory".into()))?;
+        fs::create_dir_all(parent)?;
+        let staging = tempfile::Builder::new()
+            .prefix(".pvault-restore-")
+            .tempdir_in(parent)?;
+        extract_archive(&locked.vault_path, header, dek, staging.path())?;
+        if is_profile_in_use(&browser, &locked.original_path) {
+            return Err(VaultError::ProfileInUse);
         }
-
-        let extract_tmp = locked.original_path.with_extension("pvault_unlock_tmp");
-        if extract_tmp.exists() {
-            fs::remove_dir_all(&extract_tmp)?;
+        if locked.original_path.try_exists()? {
+            let backup = parent.join(format!("pvault-backup-{}", uuid::Uuid::new_v4()));
+            fs::rename(&locked.original_path, &backup)?;
+            eprintln!(
+                "Saved the browser-created replacement profile at {}",
+                backup.display()
+            );
         }
-        fs::create_dir_all(&extract_tmp)?;
+        fs::rename(staging.path(), &locked.original_path)?;
 
-        let file = File::open(&locked.vault_path)?;
-        let mut chunk_reader = file;
-        chunk_reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
-
-        let dek_for_stream = Key(*dek.as_bytes());
-        let decrypt =
-            ChunkedDecryptReader::new(chunk_reader, dek_for_stream, header.vault_uuid, header.chunk_count);
-        let zstd = zstd::Decoder::new(decrypt)
-            .map_err(|e| VaultError::DecryptionError(format!("zstd: {e}")))?;
-        let mut archive = tar::Archive::new(zstd);
-        archive.set_preserve_permissions(true);
-        archive
-            .unpack(&extract_tmp)
-            .map_err(|e| VaultError::DecryptionError(format!("tar unpack: {e}")))?;
-
-        fs::rename(&extract_tmp, &locked.original_path)?;
-
+        clear_pending_delete(&locked.original_path)?;
         let key = (locked.browser.clone(), locked.profile_id.clone());
         self.index.remove(&key.0, &key.1);
         self.index.save()?;
@@ -305,6 +224,111 @@ impl Vault {
 
         Ok(())
     }
+}
+
+fn write_archive(
+    source: &Path,
+    vault_tmp: &Path,
+    password: &Zeroizing<String>,
+    with_recovery: bool,
+    vault_uuid: [u8; 16],
+    kdf: KdfParams,
+) -> Result<Option<Recovery>> {
+    let salt = random_salt();
+    let dek = Key::random();
+    let kek = derive_kek_argon2(password, &salt, &kdf)?;
+
+    // Optional recovery slot: HKDF over mnemonic entropy.
+    let recovery = if with_recovery {
+        Some(recovery::generate()?)
+    } else {
+        None
+    };
+    // Every key slot authenticates the same immutable header fields,
+    // including the creation timestamp. Only chunk_count changes later.
+    let mut header = build_header(&vault_uuid, &salt, &kdf, with_recovery);
+    let aad = header.aad();
+    header.wrapped_dek = wrap_dek(&kek, &dek, &aad)?;
+    header.kek_check = make_kek_check(&kek, &aad)?;
+    if let Some(rec) = &recovery {
+        let rec_kek = derive_kek_hkdf(&rec.entropy, &salt)?;
+        header.wrapped_recovery_dek = Some(wrap_dek(&rec_kek, &dek, &aad)?);
+    }
+
+    // Open the .tmp, write a placeholder header, then stream chunks.
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(vault_tmp)?;
+    file.write_all(&[0u8; HEADER_SIZE])?;
+
+    let dek_for_stream = Key(*dek.as_bytes());
+    let chunked = ChunkedEncryptWriter::new(file, dek_for_stream, vault_uuid);
+    let zstd = zstd::Encoder::new(chunked, ZSTD_LEVEL)
+        .map_err(|e| VaultError::EncryptionError(format!("zstd: {e}")))?;
+    let mut tar = tar::Builder::new(zstd);
+    // follow_symlinks=false: profiles can contain symlinks (rare); we
+    // archive the link, not the target.
+    tar.follow_symlinks(false);
+    tar.append_dir_all(".", source)
+        .map_err(|e| VaultError::EncryptionError(format!("tar append: {e}")))?;
+
+    let zstd = tar
+        .into_inner()
+        .map_err(|e| VaultError::EncryptionError(format!("tar finish: {e}")))?;
+    let chunked = zstd
+        .finish()
+        .map_err(|e| VaultError::EncryptionError(format!("zstd finish: {e}")))?;
+    let (mut file, chunk_count) = chunked
+        .finish()
+        .map_err(|e| VaultError::EncryptionError(format!("encrypt finish: {e}")))?;
+
+    header.chunk_count = chunk_count;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&header.to_bytes())?;
+    file.seek(SeekFrom::End(0))?;
+    write_footer(&mut file)?;
+    file.sync_all()?;
+    drop(file);
+
+    Ok(recovery)
+}
+
+fn extract_archive(vault_path: &Path, header: &Header, dek: Key, extract_tmp: &Path) -> Result<()> {
+    let mut chunk_reader = File::open(vault_path)?;
+    let data_end = verify_footer(&mut chunk_reader)?;
+    chunk_reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+
+    let decrypt = ChunkedDecryptReader::new(
+        chunk_reader.take(data_end - HEADER_SIZE as u64),
+        dek,
+        header.vault_uuid,
+        header.chunk_count,
+    );
+    let zstd = zstd::Decoder::new(decrypt)
+        .map_err(|e| VaultError::DecryptionError(format!("zstd: {e}")))?;
+    let mut archive = tar::Archive::new(zstd);
+    archive.set_preserve_permissions(true);
+    let entries = archive
+        .entries()
+        .map_err(|e| VaultError::DecryptionError(format!("tar entries: {e}")))?;
+    for entry in entries {
+        let mut entry =
+            entry.map_err(|e| VaultError::DecryptionError(format!("tar entry: {e}")))?;
+        if !entry
+            .unpack_in(extract_tmp)
+            .map_err(|e| VaultError::DecryptionError(format!("tar unpack: {e}")))?
+        {
+            return Err(VaultError::Corrupt(
+                "Archive entry escapes profile directory".into(),
+            ));
+        }
+    }
+
+    // tar can finish before zstd reaches its final authenticated chunk.
+    std::io::copy(&mut archive.into_inner(), &mut std::io::sink())?;
+    Ok(())
 }
 
 fn open_and_validate(path: &Path) -> Result<(Header, u64)> {
@@ -318,19 +342,24 @@ fn open_and_validate(path: &Path) -> Result<(Header, u64)> {
     if header.aead_id != AEAD_ID_AES256_GCM {
         return Err(VaultError::UnsupportedFormat(header.version));
     }
+    let payload = data_end - HEADER_SIZE as u64;
+    let full_chunk = CHUNK_SIZE as u64 + 28;
+    if header.chunk_size != CHUNK_SIZE
+        || header.chunk_count == 0
+        || payload < 29
+        || header.chunk_count != payload.div_ceil(full_chunk)
+        || payload - (header.chunk_count - 1) * full_chunk < 29
+    {
+        return Err(VaultError::Corrupt("Invalid encrypted chunk layout".into()));
+    }
     Ok((header, data_end))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_header(
     vault_uuid: &[u8; 16],
     salt: &[u8; 32],
     kdf: &KdfParams,
     has_recovery: bool,
-    chunk_count: u64,
-    wrapped_dek: [u8; 60],
-    kek_check: [u8; 41],
-    wrapped_recovery_dek: Option<[u8; 60]>,
 ) -> Header {
     let flags = if has_recovery { FLAG_HAS_RECOVERY } else { 0 };
     Header {
@@ -343,17 +372,11 @@ fn build_header(
         salt: *salt,
         aead_id: AEAD_ID_AES256_GCM,
         chunk_size: CHUNK_SIZE,
-        chunk_count,
-        wrapped_dek,
-        kek_check,
-        wrapped_recovery_dek,
+        chunk_count: 0,
+        wrapped_dek: [0; 60],
+        kek_check: [0; 41],
+        wrapped_recovery_dek: None,
     }
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
-        .collect()
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -415,19 +438,25 @@ fn reconcile_pending_delete(index: &Index) {
         Err(_) => return,
     };
 
-    let known_paths: std::collections::HashSet<PathBuf> = index
-        .locked_profiles
-        .values()
-        .map(|l| l.original_path.clone())
-        .collect();
-
     let mut still_pending = PendingDeletes::default();
     for path in pending.paths {
-        if known_paths.contains(&path) && path.exists() {
-            let _ = fs::remove_dir_all(&path);
-        } else if path.exists() {
-            // Vault not in index but plaintext still here — leave it; the
-            // user can decide. Don't auto-delete without index proof.
+        let Some(locked) = index
+            .locked_profiles
+            .values()
+            .find(|l| l.original_path == path)
+        else {
+            still_pending.paths.push(path);
+            continue;
+        };
+        let safe_to_clean = Browser::from_str(&locked.browser)
+            .map(|browser| !is_profile_in_use(&browser, &path))
+            .unwrap_or(false)
+            && open_and_validate(&locked.vault_path)
+                .map(|(header, _)| {
+                    uuid::Uuid::from_bytes(header.vault_uuid).to_string() == locked.vault_id
+                })
+                .unwrap_or(false);
+        if path.exists() && (!safe_to_clean || fs::remove_dir_all(&path).is_err()) {
             still_pending.paths.push(path);
         }
     }
@@ -436,5 +465,60 @@ fn reconcile_pending_delete(index: &Index) {
         let _ = fs::remove_file(&p);
     } else {
         let _ = fs::write(&p, serde_json::to_vec(&still_pending).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_archive_with_password_and_recovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let file = tmp.path().join("profile.pvlt");
+        fs::create_dir(&source).unwrap();
+        let bytes = b"disposable profile contents";
+        fs::write(source.join("History"), bytes).unwrap();
+        let password = Zeroizing::new("fixture password".to_string());
+        let recovery = write_archive(
+            &source,
+            &file,
+            &password,
+            true,
+            random_uuid_bytes(),
+            KdfParams {
+                m_cost_kib: 1024,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let (header, end) = open_and_validate(&file).unwrap();
+        let kek = derive_kek_argon2(&password, &header.salt, &header.kdf).unwrap();
+        let wrong =
+            derive_kek_argon2(&Zeroizing::new("wrong".into()), &header.salt, &header.kdf).unwrap();
+        assert!(verify_kek_check(&wrong, &header.kek_check, &header.aad()).is_err());
+        let recovery_key = derive_kek_hkdf(&recovery.entropy, &header.salt).unwrap();
+        for (slot, key, name) in [
+            (header.wrapped_dek, &kek, "password"),
+            (
+                header.wrapped_recovery_dek.unwrap(),
+                &recovery_key,
+                "recovery",
+            ),
+        ] {
+            let target = tmp.path().join(name);
+            fs::create_dir(&target).unwrap();
+            let dek = unwrap_dek(key, &slot, &header.aad()).unwrap();
+            extract_archive(&file, &header, dek, &target).unwrap();
+            assert_eq!(fs::read(target.join("History")).unwrap(), bytes);
+        }
+        let mut damaged = fs::read(&file).unwrap();
+        damaged[end as usize - 1] ^= 1;
+        fs::write(&file, damaged).unwrap();
+        let dek = unwrap_dek(&kek, &header.wrapped_dek, &header.aad()).unwrap();
+        assert!(extract_archive(&file, &header, dek, tmp.path()).is_err());
     }
 }
